@@ -1,0 +1,6 @@
+{
+    "webhook_url": "here",
+    "threads": 10,
+    "timeout": 10,
+    "retry_limit": 3
+}
