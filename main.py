@@ -1,31 +1,25 @@
 import json
 import random
 import string
-import time
-import requests
-import sys
+import asyncio
+import aiohttp
 import itertools
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from colorama import Fore, Style, init
-
+import sys
 
 init(autoreset=True)
 
-class FMMVChecker:
+class FMMVCheckerAsync:
     def __init__(self):
         self.load_config()
         self.load_proxies()
         self.api_url = "https://discord.com/api/v9/unique-username/username-attempt-unauthed"
-        
-        
-        self.session = requests.Session()
-        
-        
+
         if self.proxies:
             self.proxy_cycle = itertools.cycle(self.proxies)
         else:
             self.proxy_cycle = None
-        
+
     def load_config(self):
         try:
             with open('config.json', 'r') as f:
@@ -38,8 +32,7 @@ class FMMVChecker:
         try:
             with open('proxy.txt', 'r') as f:
                 lines = f.read().splitlines()
-                # Handles user:pass@host:port
-                self.proxies = [f"http://{line.strip()}" for line in lines if line.strip()]
+                self.proxies = [line.strip() for line in lines if line.strip()]
             
             if not self.proxies:
                 print(f"{Fore.YELLOW}[*] No proxies found in proxy.txt.")
@@ -49,27 +42,26 @@ class FMMVChecker:
             self.proxies = []
 
     def get_proxy(self):
-        if not self.proxy_cycle: return None
-        return {"http": next(self.proxy_cycle), "https": next(self.proxy_cycle)}
+        if not self.proxy_cycle:
+            return None
+        proxy = next(self.proxy_cycle)
+        return f"http://{proxy}" if proxy else None
 
-    def send_webhook(self, username):
-        
+    async def send_webhook(self, username):
         payload = {
             "embeds": [{
                 "title": "Available",
                 "description": f"`{username}`",
-                "color": 0,
+                "color": 0
             }]
         }
         try:
-            requests.post(self.config['webhook_url'], json=payload, timeout=5)
+            async with aiohttp.ClientSession() as session:
+                await session.post(self.config['webhook_url'], json=payload, timeout=5)
         except:
             pass
 
-    def check_username(self, username):
-        # Human Jitter to prevent "Fake" 429s
-        time.sleep(random.uniform(0.3, 0.8))
-        
+    async def check_username(self, username, session):
         headers = {
             "Content-Type": "application/json",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -77,55 +69,49 @@ class FMMVChecker:
             "Origin": "https://discord.com",
             "Referer": "https://discord.com/register"
         }
-        
+
         attempts = 0
         while attempts < self.config.get('retry_limit', 5):
             proxy = self.get_proxy()
             try:
-                response = self.session.post(
+                async with session.post(
                     self.api_url,
                     json={"username": username},
                     headers=headers,
-                    proxies=proxy,
+                    proxy=proxy,
                     timeout=self.config.get('timeout', 7)
-                )
-
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get("taken") is False:
-                        print(f"{Fore.GREEN}[+] AVAILABLE: {username}")
-                        self.send_webhook(username)
-                        # Save to local file as backup
-                        with open("hits.txt", "a") as f:
-                            f.write(f"{username}\n")
-                        return True
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if not data.get("taken"):
+                            print(f"{Fore.GREEN}[+] AVAILABLE: {username}")
+                            await self.send_webhook(username)
+                            with open("hits.txt", "a") as f:
+                                f.write(f"{username}\n")
+                            return True
+                        else:
+                            print(f"{Fore.RED}[-] TAKEN: {username}")
+                            return False
+                    elif response.status == 429:
+                        attempts += 1
+                        continue
                     else:
-                        print(f"{Fore.RED}[-] TAKEN: {username}")
-                        return False
-                
-                elif response.status_code == 429:
-                    
-                    attempts += 1
-                    continue 
-                
-                else:
-                    attempts += 1
-                    break
-
+                        attempts += 1
+                        continue
             except Exception:
                 attempts += 1
                 continue
         return None
 
-def generate_user(mode):
+async def generate_user(mode):
     chars = string.ascii_lowercase + string.digits + "_."
     if mode == '2': return ''.join(random.choices(chars, k=4))
     if mode == '3': return ''.join(random.choices(string.ascii_lowercase, k=4))
     if mode == '4': return ''.join(random.choices(chars, k=3))
     return None
 
-def main():
-    checker = FMMVChecker()
+async def main():
+    checker = FMMVCheckerAsync()
     print(f"\n{Fore.WHITE}╔══════════════════════════════════════════════╗")
     print(f"{Fore.WHITE}║                 FMMV CHECKER                 ║")
     print(f"{Fore.WHITE}║            Made by @fmmv on Discord          ║")
@@ -143,25 +129,24 @@ def main():
             with open('list.txt', 'r') as f:
                 usernames = f.read().splitlines()
         except:
-            print(f"{Fore.RED}[!] list.txt not found."); return
+            print(f"{Fore.RED}[!] list.txt not found.")
+            return
     else:
-        
-        usernames = [generate_user(choice) for _ in range(100)]
+        usernames = [await generate_user(choice) for _ in range(100)]
 
-    
-    with ThreadPoolExecutor(max_workers=checker.config['threads']) as executor:
-        futures = {executor.submit(checker.check_username, u): u for u in usernames}
-        
+    async with aiohttp.ClientSession() as session:
+        tasks = {asyncio.create_task(checker.check_username(u, session)): u for u in usernames}
+
         try:
-            while futures:
-                done, _ = wait(futures, return_when=FIRST_COMPLETED)
+            while tasks:
+                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                 for f in done:
-                    futures.pop(f)
+                    tasks.pop(f)
                     if choice != '1':
-                        new_u = generate_user(choice)
-                        futures[executor.submit(checker.check_username, new_u)] = new_u
+                        new_u = await generate_user(choice)
+                        tasks[asyncio.create_task(checker.check_username(new_u, session))] = new_u
         except KeyboardInterrupt:
             print(f"\n{Fore.YELLOW}[!] Shutting down safely...")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
